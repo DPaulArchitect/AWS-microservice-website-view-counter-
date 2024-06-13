@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  This is the 'view counter' microservice, which simply populates a dynamodb database with an additional value, and then retrieves it everytime a page is refreshed - adding a simple way of seeing how many people have visited your site. 
+Parameters:
+  YourTableName:
+    Description: Your dynamodb table name
+    Type: String
+
+  
+Resources:
+
+  DynamoDBTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions: 
+      - 
+        AttributeName: "PostID"
+        AttributeType: "S"
+      TableName: !Ref YourTableName 
+      KeySchema: 
+      - 
+        AttributeName: "PostID"
+        KeyType: "HASH"
+      ProvisionedThroughput: 
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+
+  ViewCounterRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: "/"
+      RoleName: "view-counter-lambda-role-CF"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "lambda.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "CreatePostPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: "ReadUploadBucket"
+                Effect: "Allow"
+                Action:
+                  - "dynamodb:UpdateItem"
+                  - "dynamodb:GetItem"
+                  - "dynamodb:DescribeTable"
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${YourTableName}"
+              - Sid: "Logging"  
+                Effect: "Allow"
+                Action: 
+                  - "logs:CreateLogGroup"
+                Resource: 
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: "CreateLogStream"  
+                Effect: "Allow"
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: 
+                  - "*"   
+  ViewsFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt ViewCounterRole.Arn
+      Runtime: "python3.12"
+      FunctionName: ViewsFunction
+      Environment:
+        Variables:
+          DynamoDBTableName: !Ref YourTableName
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import logging
+          import json
+          from decimal import Decimal
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Helper function to convert Decimal to int (or float if needed)
+          def decimal_default(obj):
+              if isinstance(obj, Decimal):
+                  return int(obj)  # or float(obj) if the decimal is not a whole number
+              raise TypeError
+
+          def lambda_handler(event, context):
+              logger.info(f"Received event: {json.dumps(event)}")  # Log the complete event
+              logger.info(f"Context: {context}")
+
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table_name = os.environ['DynamoDBTableName']
+
+                  # If you want to use a static post_id, replace 'default_post_id' with your chosen ID
+                  post_id = 'default_post_id'
+
+                  logger.info(f"Updating view count for PostID: {post_id} in table: {table_name}")
+
+                  table = dynamodb.Table(table_name)
+
+                  response = table.update_item(
+                      Key={'PostID': post_id},
+                      UpdateExpression='ADD ViewCount :inc',
+                      ExpressionAttributeValues={':inc': 1},
+                      ReturnValues='UPDATED_NEW'
+                  )
+
+                  logger.info(f"Update response: {response}")
+
+                  return {
+                      'statusCode': 200,
+                      # Use the decimal_default function to convert Decimal to int before JSON serialization
+                      'body': json.dumps({'ViewCount': response['Attributes']['ViewCount']}, default=decimal_default)
+                  }
+
+              except Exception as e:
+                  logger.error("Exception encountered", exc_info=True)
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'Error': 'Error updating view count'}, default=decimal_default)
+                  }
